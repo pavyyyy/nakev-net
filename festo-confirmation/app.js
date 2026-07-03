@@ -1,0 +1,473 @@
+"use strict";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "../assets/vendor/pdf.worker.min.js";
+
+const { PDFDocument, StandardFonts, rgb } = PDFLib;
+
+const FROM_ADDRESS_LINES = [
+  "Ltd. Str.",
+  "Treti Mart 42",
+  "BG-4225 PERUSHTITZA",
+];
+
+const FOOTER_LINES = [
+  "Boris Nakev",
+  "CEO| OOD",
+  "T: + 359 32 654 101 | F: + 359 32 654 100",
+    "M: +359 888 811 399",
+];
+
+const els = {
+  fileInput: document.querySelector("#fileInput"),
+  dropzone: document.querySelector("#dropzone"),
+  runButton: document.querySelector("#runButton"),
+  clearButton: document.querySelector("#clearButton"),
+  status: document.querySelector("#status"),
+  previewWrap: document.querySelector("#previewWrap"),
+  previewBody: document.querySelector("#previewBody"),
+  log: document.querySelector("#log"),
+};
+
+let selectedItems = [];
+
+els.fileInput.addEventListener("change", async () => loadFiles([...els.fileInput.files]));
+els.runButton.addEventListener("click", generate);
+els.clearButton.addEventListener("click", clear);
+setupDropzone(els.dropzone, async (files) => loadFiles(files.filter((file) => /\.pdf$/i.test(file.name))));
+
+function setupDropzone(element, onFiles) {
+  element.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    element.classList.add("dragover");
+  });
+  element.addEventListener("dragleave", () => element.classList.remove("dragover"));
+  element.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    element.classList.remove("dragover");
+    await onFiles([...event.dataTransfer.files]);
+  });
+}
+
+async function loadFiles(files) {
+  selectedItems = [];
+  els.runButton.disabled = true;
+  els.clearButton.disabled = !files.length;
+  els.previewBody.innerHTML = "";
+  els.previewWrap.hidden = true;
+  setLog("");
+
+  if (!files.length) {
+    setStatus("Ready.");
+    return;
+  }
+
+  setStatus(`Reading ${files.length} PDF file(s)...`);
+  for (const file of files) {
+    try {
+      const lines = await extractPdfLines(file);
+      const data = extractConfirmationData(lines);
+      selectedItems.push({ file, data });
+      log(`${file.name}: parsed purchase order ${data.purchase_order}`);
+    } catch (error) {
+      selectedItems.push({ file, error });
+      log(`${file.name}: ${error.message || error}`);
+    }
+  }
+
+  renderPreview();
+  const okCount = selectedItems.filter((item) => item.data).length;
+  els.runButton.disabled = okCount === 0;
+  setStatus(okCount ? `Parsed ${okCount} of ${files.length} file(s).` : "No purchase orders could be parsed.", okCount ? "ok" : "error");
+}
+
+function clear() {
+  selectedItems = [];
+  els.fileInput.value = "";
+  els.runButton.disabled = true;
+  els.clearButton.disabled = true;
+  els.previewBody.innerHTML = "";
+  els.previewWrap.hidden = true;
+  setLog("");
+  setStatus("Ready.");
+}
+
+async function generate() {
+  const validItems = selectedItems.filter((item) => item.data);
+  if (!validItems.length) return;
+
+  els.runButton.disabled = true;
+  try {
+    const outputs = [];
+    const templateBytes = await fetch("PO CONFIRM page template.pdf").then((response) => {
+      if (!response.ok) throw new Error("Could not load PDF template.");
+      return response.arrayBuffer();
+    });
+
+    for (const item of validItems) {
+      const bytes = await buildConfirmationPdf(item.data, templateBytes);
+      outputs.push({ fileName: outputFileName(item.data), bytes });
+    }
+
+    if (outputs.length === 1) {
+      downloadBlob(new Blob([outputs[0].bytes], { type: "application/pdf" }), outputs[0].fileName);
+    } else {
+      const zip = new JSZip();
+      outputs.forEach((item) => zip.file(item.fileName, item.bytes));
+      const blob = await zip.generateAsync({ type: "blob" });
+      downloadBlob(blob, `festo-confirmations-${timestampForName()}.zip`);
+    }
+
+    setStatus(`Generated ${outputs.length} PDF file(s).`, "ok");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || String(error), "error");
+  } finally {
+    els.runButton.disabled = !selectedItems.some((item) => item.data);
+  }
+}
+
+async function extractPdfLines(file) {
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const lines = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const text = await page.getTextContent();
+    lines.push(...textItemsToLines(text.items));
+  }
+  return lines.map((line) => normalizeSpaces(line)).filter(Boolean);
+}
+
+function textItemsToLines(items) {
+  const grouped = [];
+  items.forEach((item) => {
+    const text = String(item.str || "").trim();
+    if (!text) return;
+    const x = item.transform[4];
+    const y = item.transform[5];
+    let line = grouped.find((candidate) => Math.abs(candidate.y - y) < 3);
+    if (!line) {
+      line = { y, parts: [] };
+      grouped.push(line);
+    }
+    line.parts.push({ x, text });
+  });
+  return grouped
+    .sort((a, b) => b.y - a.y)
+    .map((line) => line.parts.sort((a, b) => a.x - b.x).map((part) => part.text).join(" "));
+}
+
+function extractConfirmationData(lines) {
+  const purchaseOrderIndex = findIndexContains(lines, "Purchase order");
+  const purchaseOrder = lines[purchaseOrderIndex + 1]?.trim();
+  if (!purchaseOrder) throw new Error("Could not parse purchase order.");
+
+  const supplierCurrencyIndex = findIndexContains(lines, "Supplier number Customer number Currency");
+  let supplierNumber = "";
+  lines.slice(supplierCurrencyIndex + 1, supplierCurrencyIndex + 6).some((candidate) => {
+    const match = candidate.match(/^\s*(\d+)\b/);
+    if (match) supplierNumber = match[1];
+    return Boolean(supplierNumber);
+  });
+  if (!supplierNumber) throw new Error("Could not parse supplier number.");
+
+  let deliveryAddressLines = [];
+  try {
+    const deliveryStart = findIndexContains(lines, "Please deliver to:") + 1;
+    let deliveryEnd;
+    try {
+      deliveryEnd = findIndexContains(lines, "For all questions", deliveryStart);
+    } catch {
+      deliveryEnd = findIndexContains(lines, "Supplier number Customer number Currency", deliveryStart);
+    }
+    deliveryAddressLines = lines.slice(deliveryStart, deliveryEnd).map((line) => line.trim()).filter(Boolean);
+  } catch {
+    deliveryAddressLines = [];
+  }
+
+  let orderDate = "";
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim().toLowerCase() !== "date") continue;
+    const found = lines.slice(i + 1, i + 4).find((candidate) => /^\d{2}\.\d{2}\.\d{4}$/.test(candidate.trim()));
+    if (found) {
+      orderDate = found.trim();
+      break;
+    }
+  }
+  if (!orderDate) throw new Error("Could not parse order date.");
+
+  const partNumberHeader = findIndexContains(lines, "Part number");
+  const [itemLineIndex, itemMatch] = findRegex(
+    lines,
+    /^\s*(.+?)\s+([A-Z0-9][A-Z0-9\-./:]+)\s+([\d.,]+)\s+items\s*$/i,
+    partNumberHeader,
+  );
+  const partName = normalizeSpaces(itemMatch[1]);
+  const partNumber = itemMatch[2].trim();
+  const orderQty = itemMatch[3].trim();
+
+  let toleranceUnder = "";
+  let toleranceOver = "";
+  const toleranceSource = lines.find((line) => /underdelivery:/i.test(line) && /overdelivery:/i.test(line));
+  if (toleranceSource) {
+    const toleranceMatch = toleranceSource.match(/underdelivery:\s*([\d.,]+)\s*%\s*\/\s*overdelivery:\s*([\d.,]+)\s*%/i);
+    if (toleranceMatch) {
+      toleranceUnder = toleranceMatch[1];
+      toleranceOver = toleranceMatch[2];
+    }
+  }
+
+  const materialStartPatterns = [
+    "Material code",
+    "Materials designation",
+    "Materials number",
+    "Materials festo standard",
+    "Coating",
+    "RoHS compliant",
+    "Sensitivity code",
+    "The following documents belong to this item:",
+    "Drawing no.",
+  ];
+  let materialStartIndex = null;
+  for (let i = itemLineIndex + 1; i < lines.length; i += 1) {
+    if (materialStartPatterns.some((pattern) => lines[i].startsWith(pattern))) {
+      materialStartIndex = i;
+      break;
+    }
+  }
+
+  const deliverySearchStart = materialStartIndex ?? itemLineIndex;
+  const [, deliveryMatch] = findRegex(lines, /Delivery date\s+([\d.]+)/, deliverySearchStart);
+  const [, priceMatch] = findRegex(lines, /Price per\s+(\d+)\s+PC\s+([\d.,]+)\s+([\d.,]+)/i, deliverySearchStart);
+
+  const materialLines = [];
+  if (materialStartIndex !== null) {
+    const deliveryDateIndex = findIndexContains(lines, "Delivery date", materialStartIndex);
+    const allowedPrefixes = materialStartPatterns.filter((item) => item !== "The following documents belong to this item:");
+    lines.slice(materialStartIndex, deliveryDateIndex).forEach((rawLine) => {
+      const clean = normalizeSpaces(rawLine);
+      if (clean && allowedPrefixes.some((prefix) => clean.startsWith(prefix))) materialLines.push(clean);
+    });
+  }
+
+  return {
+    purchase_order: purchaseOrder,
+    supplier_number: supplierNumber,
+    part_number: partNumber,
+    part_name: partName,
+    delivery_tolerance_under: toleranceUnder,
+    delivery_tolerance_over: toleranceOver,
+    material_description_lines: materialLines,
+    order_date: orderDate,
+    delivery_date: deliveryMatch[1],
+    order_qty: orderQty,
+    price_unit_count: priceMatch[1],
+    price_per_piece: priceMatch[2],
+    price_total: priceMatch[3],
+    delivery_address: deliveryAddressLines.join("\n"),
+  };
+}
+
+async function buildConfirmationPdf(data, templateBytes) {
+  const output = await PDFDocument.create();
+  const template = await PDFDocument.load(templateBytes);
+  const [templatePage] = await output.copyPages(template, [0]);
+  const page = output.addPage(templatePage);
+  const width = page.getWidth();
+  const height = page.getHeight();
+
+  const font = await output.embedFont(StandardFonts.Helvetica);
+  const bold = await output.embedFont(StandardFonts.HelveticaBold);
+  const italic = await output.embedFont(StandardFonts.HelveticaOblique);
+
+  const left = mm(28);
+  const rightBlock = mm(108);
+  let y = height - mm(50);
+
+  drawLine(page, "From:", left, y, 13, font);
+  drawLine(page, "Deliver To:", rightBlock, y, 13, font);
+  y -= 22;
+  drawMultiline(page, FROM_ADDRESS_LINES, left, y, 12.5, font, 16);
+  drawMultiline(page, splitLines(data.delivery_address), rightBlock, y, 12.5, font, 16);
+  y -= 50;
+  drawLine(page, `supplier number: ${data.supplier_number}`, left, y, 12.5, font);
+
+  y -= 40;
+  const intro = "We would like to confirm your purchase order:";
+  const poWidth = bold.widthOfTextAtSize(data.purchase_order, 13.5);
+  const introWidth = font.widthOfTextAtSize(intro, 13.5);
+  const introX = (width - introWidth - poWidth - 10) / 2;
+  drawLine(page, intro, introX, y, 13.5, font);
+  page.drawRectangle({ x: introX + introWidth + 8, y: y - 2, width: poWidth + 5, height: 16, color: rgb(1, 0.95, 0) });
+  drawLine(page, data.purchase_order, introX + introWidth + 10, y, 13.5, bold);
+
+  y -= 42;
+  drawCentered(page, `P/N ${data.part_number}   -   ${data.part_name}`, y, 12.5, font);
+
+  y -= 48;
+  drawLine(page, `Price per ${data.price_unit_count} piece(s): ${data.price_per_piece}`, left, y, 11.5, font);
+  drawLine(page, `QTY: ${data.order_qty}`, left + mm(58), y, 11.5, font);
+  drawLine(page, `Price total: ${data.price_total} EUR`, left + mm(100), y, 11.5, font);
+  y -= 22;
+  drawLine(page, `Order Date: ${data.order_date}`, left, y, 11.5, font);
+  drawLine(page, `Delivery date: ${data.delivery_date}`, left + mm(100), y, 11.5, font);
+
+  y -= 42;
+  if (data.delivery_tolerance_under || data.delivery_tolerance_over) {
+    drawLine(page, "Delivery tolerance:", left, y, 11.5, bold);
+    y -= 18;
+    if (data.delivery_tolerance_under) {
+      drawLine(page, `- underdelivery: ${data.delivery_tolerance_under} %`, left, y, 11.2, font);
+      y -= 16;
+    }
+    if (data.delivery_tolerance_over) {
+      drawLine(page, `+ overdelivery: ${data.delivery_tolerance_over} %`, left, y, 11.2, font);
+      y -= 16;
+    }
+    y -= 10;
+  }
+
+  if (data.material_description_lines.length) {
+    drawLine(page, "Material Descriptions:", left, y, 11.5, bold);
+    y -= 17;
+    for (const line of data.material_description_lines) {
+      const wrapped = wrapText(formatMaterialLine(line), font, 11.2, width - left - mm(28));
+      wrapped.forEach((part) => {
+        drawLine(page, part, left, y, 11.2, line.startsWith("RoHS compliant") ? italic : font);
+        y -= 14.5;
+      });
+    }
+  }
+
+  drawMultiline(page, FOOTER_LINES, left, mm(48), 8.7, font, 11);
+  return output.save();
+}
+
+function drawLine(page, text, x, y, size, font) {
+  page.drawText(String(text || ""), { x, y, size, font, color: rgb(0, 0, 0) });
+}
+
+function drawCentered(page, text, y, size, font) {
+  const textWidth = font.widthOfTextAtSize(String(text || ""), size);
+  drawLine(page, text, (page.getWidth() - textWidth) / 2, y, size, font);
+}
+
+function drawMultiline(page, lines, x, y, size, font, leading) {
+  lines.filter(Boolean).forEach((line, index) => {
+    drawLine(page, line, x, y - index * leading, size, font);
+  });
+}
+
+function wrapText(text, font, size, maxWidth) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+  words.forEach((word) => {
+    const next = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(next, size) <= maxWidth || !current) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  });
+  if (current) lines.push(current);
+  return lines;
+}
+
+function formatMaterialLine(line) {
+  return normalizeSpaces(String(line || "").replace(/,$/, ""));
+}
+
+function renderPreview() {
+  els.previewWrap.hidden = !selectedItems.length;
+  els.previewBody.innerHTML = selectedItems.map((item) => {
+    if (item.error) {
+      return `<tr><td>${escapeHtml(item.file.name)}</td><td colspan="3">${escapeHtml(item.error.message || item.error)}</td></tr>`;
+    }
+    return `<tr><td>${escapeHtml(item.file.name)}</td><td>${escapeHtml(item.data.purchase_order)}</td><td>${escapeHtml(item.data.part_number)}</td><td>${escapeHtml(item.data.delivery_date)}</td></tr>`;
+  }).join("");
+}
+
+function findIndexContains(lines, text, start = 0) {
+  for (let i = start; i < lines.length; i += 1) {
+    if (lines[i].includes(text)) return i;
+  }
+  throw new Error(`Could not find text: ${text}`);
+}
+
+function findRegex(lines, regex, start = 0) {
+  for (let i = start; i < lines.length; i += 1) {
+    const match = lines[i].match(regex);
+    if (match) return [i, match];
+  }
+  throw new Error(`Could not find pattern: ${regex}`);
+}
+
+function normalizeSpaces(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function splitLines(text) {
+  return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function mm(value) {
+  return value * 72 / 25.4;
+}
+
+function outputFileName(data) {
+  const suffix = String(data.purchase_order || "confirmation").split("/").pop();
+  return safeFileName(`Purchase order Confirmation ${suffix}.pdf`);
+}
+
+function safeFileName(name) {
+  return String(name).replace(/[<>:"/\\|?*]/g, "_").trim() || "confirmation.pdf";
+}
+
+function setStatus(message, kind = "") {
+  els.status.textContent = message;
+  els.status.className = `status ${kind}`.trim();
+}
+
+function log(message) {
+  els.log.hidden = false;
+  els.log.textContent += `${message}\n`;
+}
+
+function setLog(message) {
+  els.log.textContent = message;
+  els.log.hidden = !message;
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function timestampForName() {
+  const now = new Date();
+  return [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    "-",
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  }[char]));
+}

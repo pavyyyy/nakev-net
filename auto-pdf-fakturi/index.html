@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto PDF Fakturi</title>
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="app-title">
+          <h1>Auto PDF Fakturi</h1>
+          <p>ABB invoice PDF to Excel.</p>
+        </div>
+        <div class="row">
+          <label class="theme-control">
+            <input type="checkbox" data-theme-toggle />
+            <span>Dark</span>
+          </label>
+          <a class="home-link" href="../">Home</a>
+        </div>
+      </header>
+
+      <section class="panel stack">
+        <label class="dropzone" id="dropzone">
+          <input id="fileInput" type="file" accept=".pdf" />
+          <span>
+            <span class="drop-title">Select ABB PDF</span>
+            <span class="drop-copy">Extracts document, date, and gross amount to `.xlsx`.</span>
+          </span>
+        </label>
+        <div class="row">
+          <button class="primary" id="runButton" type="button" disabled>Generate Excel</button>
+          <button id="clearButton" type="button" disabled>Clear</button>
+        </div>
+        <div class="status" id="status">Ready.</div>
+        <div class="table-wrap" id="previewWrap" hidden>
+          <table>
+            <thead><tr><th>Your document</th><th>Date</th><th>Gross amount</th></tr></thead>
+            <tbody id="previewBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="../assets/vendor/pdf.min.js"></script>
+    <script src="../assets/vendor/xlsx.full.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

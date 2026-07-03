@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Festo Confirmation</title>
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="app-title">
+          <h1>Festo Confirmation</h1>
+          <p>Purchase order confirmation PDFs.</p>
+        </div>
+        <div class="row">
+          <label class="theme-control">
+            <input type="checkbox" data-theme-toggle />
+            <span>Dark</span>
+          </label>
+          <a class="home-link" href="../">Home</a>
+        </div>
+      </header>
+
+      <section class="panel stack">
+        <label class="dropzone" id="dropzone">
+          <input id="fileInput" type="file" accept=".pdf" multiple />
+          <span>
+            <span class="drop-title">Select purchase order PDFs</span>
+            <span class="drop-copy">One PDF downloads directly. Multiple PDFs download as a zip.</span>
+          </span>
+        </label>
+        <div class="row">
+          <button class="primary" id="runButton" type="button" disabled>Generate</button>
+          <button id="clearButton" type="button" disabled>Clear</button>
+        </div>
+        <div class="status" id="status">Ready.</div>
+        <div class="table-wrap" id="previewWrap" hidden>
+          <table>
+            <thead><tr><th>Input</th><th>Purchase order</th><th>Part</th><th>Delivery</th></tr></thead>
+            <tbody id="previewBody"></tbody>
+          </table>
+        </div>
+        <pre id="log" hidden></pre>
+      </section>
+    </main>
+
+    <script src="../assets/vendor/pdf.min.js"></script>
+    <script src="../assets/vendor/pdf-lib.min.js"></script>
+    <script src="../assets/vendor/jszip.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

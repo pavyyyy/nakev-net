@@ -417,7 +417,6 @@ function readOrderNumber(lines, orderTypeIndex, orderType) {
   if (inlineMatch) {
     const inlineNumber = inlineMatch[1].match(numberPattern);
     if (inlineNumber) return inlineNumber[0];
-    if (inlineMatch[1].trim()) return inlineMatch[1].trim();
   }
 
   for (const candidate of nearby) {
@@ -428,7 +427,8 @@ function readOrderNumber(lines, orderTypeIndex, orderType) {
   for (let i = orderTypeIndex + 1; i < Math.min(lines.length, orderTypeIndex + 5); i += 1) {
     const candidate = normalizeSpaces(lines[i]);
     if (!candidate || ORDER_LABELS.includes(candidate) || candidate.toLowerCase() === "date") continue;
-    return candidate;
+    const candidateNumber = candidate.match(numberPattern);
+    if (candidateNumber) return candidateNumber[0];
   }
 
   return "";

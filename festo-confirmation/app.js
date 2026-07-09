@@ -5,16 +5,24 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "../assets/vendor/pdf.worker.min.js";
 const { PDFDocument, StandardFonts, rgb } = PDFLib;
 
 const FROM_ADDRESS_LINES = [
-  "Ltd. Str.",
+  "EAZ OOD",
   "Treti Mart 42",
-  "BG-4225 PERUSHTITZA",
+  "4225 Perushtitsa",
 ];
 
 const FOOTER_LINES = [
-  "Boris Nakev",
-  "CEO| OOD",
-  "T: + 359 32 654 101 | F: + 359 32 654 100",
-    "M: +359 888 811 399",
+  "Katya Kusheva",
+  "Deputy production manager",
+  "T: + 359 32 654 115 | F: + 359 32 654 100",
+  "M: +359 888 829 316 | e: k.kusheva@eaz-bg.com | http://www.eaz-bg.com",
+];
+
+const DELIVERY_ADDRESS_EXCLUDES = [
+  "EAZ OOD",
+  "Appedix 1",
+  "Appendix 1",
+  "Treti Mart 42",
+  "4225 Perushtitsa",
 ];
 
 const els = {
@@ -65,8 +73,8 @@ async function loadFiles(files) {
   setStatus(`Reading ${files.length} PDF file(s)...`);
   for (const file of files) {
     try {
-      const lines = await extractPdfLines(file);
-      const data = extractConfirmationData(lines);
+      const layout = await extractPdfLayout(file);
+      const data = extractConfirmationData(layout);
       selectedItems.push({ file, data });
       log(`${file.name}: parsed ${data.order_type.toLowerCase()} ${data.order_number}`);
     } catch (error) {
@@ -109,13 +117,9 @@ async function generate() {
       outputs.push({ fileName: outputFileName(item.data), bytes });
     }
 
-    if (outputs.length === 1) {
-      downloadBlob(new Blob([outputs[0].bytes], { type: "application/pdf" }), outputs[0].fileName);
-    } else {
-      const zip = new JSZip();
-      outputs.forEach((item) => zip.file(item.fileName, item.bytes));
-      const blob = await zip.generateAsync({ type: "blob" });
-      downloadBlob(blob, `festo-confirmations-${timestampForName()}.zip`);
+    for (const item of outputs) {
+      downloadBlob(new Blob([item.bytes], { type: "application/pdf" }), item.fileName);
+      await delay(250);
     }
 
     setStatus(`Generated ${outputs.length} PDF file(s).`, "ok");
@@ -127,18 +131,22 @@ async function generate() {
   }
 }
 
-async function extractPdfLines(file) {
+async function extractPdfLayout(file) {
   const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
-  const lines = [];
+  const pages = [];
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
     const text = await page.getTextContent();
-    lines.push(...textItemsToLines(text.items));
+    pages.push(buildPageLayout(text.items, pageNumber));
   }
-  return lines.map((line) => normalizeSpaces(line)).filter(Boolean);
+  return {
+    sourceName: file.name,
+    pages,
+    lines: pages.flatMap((page) => page.lines.map((line) => line.text)),
+  };
 }
 
-function textItemsToLines(items) {
+function buildPageLayout(items, pageNumber) {
   const grouped = [];
   items.forEach((item) => {
     const text = String(item.str || "").trim();
@@ -150,16 +158,28 @@ function textItemsToLines(items) {
       line = { y, parts: [] };
       grouped.push(line);
     }
-    line.parts.push({ x, text });
+    line.parts.push({ x, text, width: item.width || 0 });
   });
-  return grouped
+
+  const lines = grouped
     .sort((a, b) => b.y - a.y)
-    .map((line) => line.parts.sort((a, b) => a.x - b.x).map((part) => part.text).join(" "));
+    .map((line) => {
+      const parts = line.parts.sort((a, b) => a.x - b.x);
+      return {
+        pageNumber,
+        y: line.y,
+        parts,
+        text: normalizeSpaces(parts.map((part) => part.text).join(" ")),
+      };
+    })
+    .filter((line) => line.text);
+
+  return { pageNumber, lines };
 }
 
-function extractConfirmationData(lines) {
-  const { label: orderType, index: orderTypeIndex } = findOrderHeader(lines);
-  const orderNumber = readOrderNumber(lines, orderTypeIndex, orderType);
+function extractConfirmationData(layout) {
+  const lines = layout.lines;
+  const { orderType, orderNumber } = detectOrderInfo(layout);
   if (!orderNumber) throw new Error(`Could not parse ${orderType.toLowerCase()}.`);
 
   const supplierCurrencyIndex = findIndexContains(lines, "Supplier number Customer number Currency");
@@ -173,14 +193,7 @@ function extractConfirmationData(lines) {
 
   let deliveryAddressLines = [];
   try {
-    const deliveryStart = findIndexContains(lines, "Please deliver to:") + 1;
-    let deliveryEnd;
-    try {
-      deliveryEnd = findIndexContains(lines, "For all questions", deliveryStart);
-    } catch {
-      deliveryEnd = findIndexContains(lines, "Supplier number Customer number Currency", deliveryStart);
-    }
-    deliveryAddressLines = lines.slice(deliveryStart, deliveryEnd).map((line) => line.trim()).filter(Boolean);
+    deliveryAddressLines = extractDeliveryAddressLines(layout.pages[0]);
   } catch {
     deliveryAddressLines = [];
   }
@@ -348,6 +361,37 @@ function drawLine(page, text, x, y, size, font) {
   page.drawText(toPdfText(text), { x, y, size, font, color: rgb(0, 0, 0) });
 }
 
+function detectOrderInfo(layout) {
+  const lines = layout.lines || [];
+  const joinedText = normalizeSpaces(lines.join(" "));
+  const lowered = joinedText.toLowerCase();
+  const sourceName = String(layout.sourceName || "").toLowerCase();
+  let orderType = sourceName.includes("pilot order")
+    ? "Pilot order"
+    : sourceName.includes("purchase order")
+      ? "Purchase order"
+      : ORDER_LABELS.find((label) => lowered.includes(label.toLowerCase()));
+  if (!orderType && lowered.includes("pilot")) orderType = "Pilot order";
+  if (!orderType && lowered.includes("purchase")) orderType = "Purchase order";
+
+  const numberPattern = /\b[A-Z]{2,}\/\d{6,}\b/;
+  const orderNumberMatch = joinedText.match(numberPattern);
+  let orderNumber = orderNumberMatch ? orderNumberMatch[0] : "";
+
+  if (!orderType) {
+    try {
+      const found = findOrderHeader(lines);
+      orderType = found.label;
+      if (!orderNumber) orderNumber = readOrderNumber(lines, found.index, found.label);
+    } catch {
+      if (sourceName.includes("pilot order")) orderType = "Pilot order";
+      else orderType = "Purchase order";
+    }
+  }
+
+  return { orderType, orderNumber };
+}
+
 function drawCentered(page, text, y, size, font) {
   const safeText = toPdfText(text);
   const textWidth = font.widthOfTextAtSize(safeText, size);
@@ -461,6 +505,42 @@ function splitLines(text) {
   return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
+function cleanDeliveryAddressLine(line) {
+  let cleaned = normalizeSpaces(line);
+  for (const exclude of DELIVERY_ADDRESS_EXCLUDES) {
+    const pattern = new RegExp(escapeRegex(exclude), "gi");
+    cleaned = cleaned.replace(pattern, " ");
+  }
+  cleaned = normalizeSpaces(cleaned);
+  if (DELIVERY_ADDRESS_EXCLUDES.some((exclude) => cleaned.toLowerCase().includes(exclude.toLowerCase()))) {
+    return "";
+  }
+  return cleaned;
+}
+
+function extractDeliveryAddressLines(page) {
+  if (!page) return [];
+  const labelIndex = page.lines.findIndex((line) => line.text.includes("Please deliver to:"));
+  if (labelIndex === -1) throw new Error("Could not find delivery address.");
+
+  const labelLine = page.lines[labelIndex];
+  const labelPart = labelLine.parts.find((part) => /Please/i.test(part.text)) || labelLine.parts[0];
+  const rightColumnX = labelPart ? labelPart.x - 2 : 250;
+  const stopPatterns = ["For all questions", "Supplier number", "Telephone number", "Faxnumber", "Your contact partner"];
+  const deliveryLines = [];
+
+  for (let i = labelIndex + 1; i < page.lines.length; i += 1) {
+    const line = page.lines[i];
+    if (stopPatterns.some((pattern) => line.text.includes(pattern))) break;
+    const rightParts = line.parts.filter((part) => part.x >= rightColumnX);
+    if (!rightParts.length) continue;
+    const cleaned = cleanDeliveryAddressLine(rightParts.map((part) => part.text).join(" "));
+    if (cleaned) deliveryLines.push(cleaned);
+  }
+
+  return [...new Set(deliveryLines)];
+}
+
 function toPdfText(text) {
   return transliterateCyrillic(normalizeSpaces(String(text || "")));
 }
@@ -541,16 +621,8 @@ function downloadBlob(blob, fileName) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function timestampForName() {
-  const now = new Date();
-  return [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-    "-",
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-  ].join("");
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escapeHtml(value) {

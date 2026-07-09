@@ -56,27 +56,18 @@ async function generate() {
   if (!selectedFiles.length) return;
   els.runButton.disabled = true;
   try {
-    const outputs = [];
+    const sheets = [];
     for (const file of selectedFiles) {
-      const result = await convertAccountingFile(file, { convertDocumentNumber: false, datesAsText: false });
-      outputs.push({
-        fileName: replaceExtension(file.name, ".xlsx"),
-        bytes: writeWorkbook(result.workbook),
-        rowCount: result.rowCount,
-      });
+      const result = await convertAccountingFile(file);
+      sheets.push(result);
     }
 
-    if (outputs.length === 1) {
-      downloadBytes(outputs[0].bytes, outputs[0].fileName, XLSX_MIME);
-    } else {
-      const zip = new JSZip();
-      outputs.forEach((item) => zip.file(item.fileName, item.bytes));
-      const blob = await zip.generateAsync({ type: "blob" });
-      downloadBlob(blob, `auto-excel-${timestampForName()}.zip`);
-    }
+    const workbook = buildCombinedWorkbook(sheets);
+    const fileName = buildCombinedFileName(sheets);
+    downloadBytes(writeWorkbook(workbook), fileName, XLSX_MIME);
 
-    renderResults(outputs);
-    setStatus(`Generated ${outputs.length} workbook(s).`, "ok");
+    renderResults(sheets);
+    setStatus(`Generated ${fileName}.`, "ok");
   } catch (error) {
     console.error(error);
     setStatus(error.message || String(error), "error");
@@ -87,13 +78,13 @@ async function generate() {
 
 function renderResults(outputs) {
   els.previewBody.innerHTML = outputs.map((item) => (
-    `<tr><td>${escapeHtml(item.fileName)}</td><td>${item.rowCount}</td><td>${escapeHtml(groupFromName(item.fileName))}</td></tr>`
+    `<tr><td>${escapeHtml(item.sheetName)}</td><td>${item.rowCount}</td><td>${escapeHtml(item.group)}</td></tr>`
   )).join("");
 }
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-async function convertAccountingFile(file, options) {
+async function convertAccountingFile(file) {
   const workbook = XLSX.read(await file.arrayBuffer(), {
     type: "array",
     cellDates: true,
@@ -122,8 +113,8 @@ async function convertAccountingFile(file, options) {
     if (dateValue) {
       rows.push([
         firm || "",
-        options.convertDocumentNumber ? maybeNumber(documentNumber) : documentNumber,
-        options.datesAsText ? formatDateSlash(dateValue) : dateValue,
+        normalizeDocumentNumber(documentNumber),
+        formatDateDots(dateValue),
         currency,
         debit,
         credit,
@@ -131,15 +122,40 @@ async function convertAccountingFile(file, options) {
     }
   }
 
-  const output = XLSX.utils.book_new();
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  sheet["!cols"] = [{ wch: 24 }, { wch: 20 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
-  for (let r = 2; r <= rows.length; r += 1) {
-    const dateCell = sheet[`C${r}`];
-    if (dateCell && dateCell.v instanceof Date) dateCell.z = "dd.mm.yyyy";
+  return { group, sheetName: group, rows, rowCount: rows.length - 1 };
+}
+
+function buildCombinedWorkbook(outputs) {
+  const workbook = XLSX.utils.book_new();
+  const usedNames = new Set();
+
+  outputs.forEach((item) => {
+    const sheet = XLSX.utils.aoa_to_sheet(item.rows);
+    sheet["!cols"] = [{ wch: 24 }, { wch: 20 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
+    const sheetName = uniqueSheetName(item.sheetName, usedNames);
+    usedNames.add(sheetName);
+    XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+  });
+
+  return workbook;
+}
+
+function uniqueSheetName(baseName, usedNames) {
+  const cleanBaseName = String(baseName || "Sheet").slice(0, 31) || "Sheet";
+  if (!usedNames.has(cleanBaseName)) return cleanBaseName;
+
+  let index = 2;
+  while (true) {
+    const suffix = `_${index}`;
+    const candidate = `${cleanBaseName.slice(0, 31 - suffix.length)}${suffix}`;
+    if (!usedNames.has(candidate)) return candidate;
+    index += 1;
   }
-  XLSX.utils.book_append_sheet(output, sheet, "Sheet1");
-  return { workbook: output, rows, rowCount: rows.length - 1 };
+}
+
+function buildCombinedFileName(outputs) {
+  const groups = [...new Set(outputs.map((item) => item.group).filter(Boolean))];
+  return safeFileName(`${groups.join("_") || "auto-excel"}.xlsx`);
 }
 
 function writeWorkbook(workbook) {
@@ -173,23 +189,25 @@ function cellValue(sheet, address) {
   return cell ? cell.v : null;
 }
 
-function maybeNumber(value) {
-  if (typeof value !== "string") return value;
-  const normalized = value.trim().replace(",", ".");
-  if (!normalized) return value;
-  const number = Number(normalized);
-  if (!Number.isFinite(number)) return value;
-  return Number.isInteger(number) ? Math.trunc(number) : number;
-}
-
 function groupFromName(name) {
   return String(name || "").slice(0, 3);
 }
 
-function formatDateSlash(date) {
+function formatDateDots(date) {
   return [date.getDate(), date.getMonth() + 1, date.getFullYear()]
     .map((part) => String(part).padStart(2, "0"))
-    .join("/");
+    .join(".");
+}
+
+function normalizeDocumentNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value !== "string") return value;
+
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return value;
+
+  const withoutLeadingZeroes = trimmed.replace(/^0+/, "");
+  return withoutLeadingZeroes || "0";
 }
 
 function replaceExtension(name, extension) {
@@ -218,18 +236,6 @@ function downloadBlob(blob, fileName) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function timestampForName() {
-  const now = new Date();
-  return [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-    "-",
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-  ].join("");
 }
 
 function safeFileName(name) {

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Auto Excel</title>
+    <title>Auto Excel V4</title>
     <script src="../assets/theme.js"></script>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
@@ -11,7 +11,7 @@
     <main class="app-shell">
       <header class="topbar">
         <div class="app-title">
-          <h1>Auto Excel</h1>
+          <h1>Auto Excel V4</h1>
           <p>Accounting export converter.</p>
         </div>
         <div class="row">
@@ -28,7 +28,7 @@
           <input id="fileInput" type="file" accept=".xls,.xlsx" multiple />
           <span>
             <span class="drop-title">Select Excel file(s)</span>
-            <span class="drop-copy">The converted workbook downloads as `.xlsx`. Multiple files download as a zip.</span>
+            <span class="drop-copy">The converted workbook downloads directly as `.xlsx`, with one sheet per group.</span>
           </span>
         </label>
         <div class="row">
@@ -46,7 +46,6 @@
     </main>
 
     <script src="../assets/vendor/xlsx.full.min.js"></script>
-    <script src="../assets/vendor/jszip.min.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

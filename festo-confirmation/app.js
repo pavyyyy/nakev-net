@@ -29,6 +29,7 @@ const els = {
 };
 
 let selectedItems = [];
+const ORDER_LABELS = ["Purchase order", "Pilot order"];
 
 els.fileInput.addEventListener("change", async () => loadFiles([...els.fileInput.files]));
 els.runButton.addEventListener("click", generate);
@@ -67,7 +68,7 @@ async function loadFiles(files) {
       const lines = await extractPdfLines(file);
       const data = extractConfirmationData(lines);
       selectedItems.push({ file, data });
-      log(`${file.name}: parsed purchase order ${data.purchase_order}`);
+      log(`${file.name}: parsed ${data.order_type.toLowerCase()} ${data.order_number}`);
     } catch (error) {
       selectedItems.push({ file, error });
       log(`${file.name}: ${error.message || error}`);
@@ -77,7 +78,7 @@ async function loadFiles(files) {
   renderPreview();
   const okCount = selectedItems.filter((item) => item.data).length;
   els.runButton.disabled = okCount === 0;
-  setStatus(okCount ? `Parsed ${okCount} of ${files.length} file(s).` : "No purchase orders could be parsed.", okCount ? "ok" : "error");
+  setStatus(okCount ? `Parsed ${okCount} of ${files.length} file(s).` : "No orders could be parsed.", okCount ? "ok" : "error");
 }
 
 function clear() {
@@ -157,9 +158,9 @@ function textItemsToLines(items) {
 }
 
 function extractConfirmationData(lines) {
-  const purchaseOrderIndex = findIndexContains(lines, "Purchase order");
-  const purchaseOrder = lines[purchaseOrderIndex + 1]?.trim();
-  if (!purchaseOrder) throw new Error("Could not parse purchase order.");
+  const { label: orderType, index: orderTypeIndex } = findOrderHeader(lines);
+  const orderNumber = readOrderNumber(lines, orderTypeIndex, orderType);
+  if (!orderNumber) throw new Error(`Could not parse ${orderType.toLowerCase()}.`);
 
   const supplierCurrencyIndex = findIndexContains(lines, "Supplier number Customer number Currency");
   let supplierNumber = "";
@@ -250,7 +251,8 @@ function extractConfirmationData(lines) {
   }
 
   return {
-    purchase_order: purchaseOrder,
+    order_type: orderType,
+    order_number: orderNumber,
     supplier_number: supplierNumber,
     part_number: partNumber,
     part_name: partName,
@@ -292,13 +294,13 @@ async function buildConfirmationPdf(data, templateBytes) {
   drawLine(page, `supplier number: ${data.supplier_number}`, left, y, 12.5, font);
 
   y -= 40;
-  const intro = "We would like to confirm your purchase order:";
-  const poWidth = bold.widthOfTextAtSize(data.purchase_order, 13.5);
+  const intro = `We would like to confirm your ${data.order_type.toLowerCase()}:`;
+  const poWidth = bold.widthOfTextAtSize(data.order_number, 13.5);
   const introWidth = font.widthOfTextAtSize(intro, 13.5);
   const introX = (width - introWidth - poWidth - 10) / 2;
   drawLine(page, intro, introX, y, 13.5, font);
   page.drawRectangle({ x: introX + introWidth + 8, y: y - 2, width: poWidth + 5, height: 16, color: rgb(1, 0.95, 0) });
-  drawLine(page, data.purchase_order, introX + introWidth + 10, y, 13.5, bold);
+  drawLine(page, data.order_number, introX + introWidth + 10, y, 13.5, bold);
 
   y -= 42;
   drawCentered(page, `P/N ${data.part_number}   -   ${data.part_name}`, y, 12.5, font);
@@ -384,8 +386,33 @@ function renderPreview() {
     if (item.error) {
       return `<tr><td>${escapeHtml(item.file.name)}</td><td colspan="3">${escapeHtml(item.error.message || item.error)}</td></tr>`;
     }
-    return `<tr><td>${escapeHtml(item.file.name)}</td><td>${escapeHtml(item.data.purchase_order)}</td><td>${escapeHtml(item.data.part_number)}</td><td>${escapeHtml(item.data.delivery_date)}</td></tr>`;
+    return `<tr><td>${escapeHtml(item.file.name)}</td><td>${escapeHtml(item.data.order_number)}</td><td>${escapeHtml(item.data.part_number)}</td><td>${escapeHtml(item.data.delivery_date)}</td></tr>`;
   }).join("");
+}
+
+function findOrderHeader(lines) {
+  for (const label of ORDER_LABELS) {
+    try {
+      return { label, index: findIndexContains(lines, label) };
+    } catch {
+      // Try the next supported order label.
+    }
+  }
+  throw new Error(`Could not find text: ${ORDER_LABELS.join(" or ")}`);
+}
+
+function readOrderNumber(lines, orderTypeIndex, orderType) {
+  const sameLine = normalizeSpaces(lines[orderTypeIndex] || "");
+  const inlineMatch = sameLine.match(new RegExp(`^${escapeRegex(orderType)}\\s+(.+)$`, "i"));
+  if (inlineMatch) return inlineMatch[1].trim();
+
+  for (let i = orderTypeIndex + 1; i < Math.min(lines.length, orderTypeIndex + 5); i += 1) {
+    const candidate = normalizeSpaces(lines[i]);
+    if (!candidate || ORDER_LABELS.includes(candidate) || candidate.toLowerCase() === "date") continue;
+    return candidate;
+  }
+
+  return "";
 }
 
 function findIndexContains(lines, text, start = 0) {
@@ -407,6 +434,10 @@ function normalizeSpaces(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+function escapeRegex(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function splitLines(text) {
   return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
@@ -416,8 +447,8 @@ function mm(value) {
 }
 
 function outputFileName(data) {
-  const suffix = String(data.purchase_order || "confirmation").split("/").pop();
-  return safeFileName(`Purchase order Confirmation ${suffix}.pdf`);
+  const suffix = String(data.order_number || "confirmation").split("/").pop();
+  return safeFileName(`${data.order_type} Confirmation ${suffix}.pdf`);
 }
 
 function safeFileName(name) {

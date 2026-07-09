@@ -345,12 +345,13 @@ async function buildConfirmationPdf(data, templateBytes) {
 }
 
 function drawLine(page, text, x, y, size, font) {
-  page.drawText(String(text || ""), { x, y, size, font, color: rgb(0, 0, 0) });
+  page.drawText(toPdfText(text), { x, y, size, font, color: rgb(0, 0, 0) });
 }
 
 function drawCentered(page, text, y, size, font) {
-  const textWidth = font.widthOfTextAtSize(String(text || ""), size);
-  drawLine(page, text, (page.getWidth() - textWidth) / 2, y, size, font);
+  const safeText = toPdfText(text);
+  const textWidth = font.widthOfTextAtSize(safeText, size);
+  drawLine(page, safeText, (page.getWidth() - textWidth) / 2, y, size, font);
 }
 
 function drawMultiline(page, lines, x, y, size, font, leading) {
@@ -360,7 +361,7 @@ function drawMultiline(page, lines, x, y, size, font, leading) {
 }
 
 function wrapText(text, font, size, maxWidth) {
-  const words = String(text || "").split(/\s+/).filter(Boolean);
+  const words = toPdfText(text).split(/\s+/).filter(Boolean);
   const lines = [];
   let current = "";
   words.forEach((word) => {
@@ -377,7 +378,7 @@ function wrapText(text, font, size, maxWidth) {
 }
 
 function formatMaterialLine(line) {
-  return normalizeSpaces(String(line || "").replace(/,$/, ""));
+  return toPdfText(normalizeSpaces(String(line || "").replace(/,$/, "")));
 }
 
 function renderPreview() {
@@ -403,8 +404,26 @@ function findOrderHeader(lines) {
 
 function readOrderNumber(lines, orderTypeIndex, orderType) {
   const sameLine = normalizeSpaces(lines[orderTypeIndex] || "");
+  const nearby = lines
+    .slice(Math.max(0, orderTypeIndex), Math.min(lines.length, orderTypeIndex + 8))
+    .map((line) => normalizeSpaces(line))
+    .filter(Boolean);
+  const numberPattern = /\b[A-Z]{2,}\/\d{6,}\b/;
+
+  const sameLineNumber = sameLine.match(numberPattern);
+  if (sameLineNumber) return sameLineNumber[0];
+
   const inlineMatch = sameLine.match(new RegExp(`^${escapeRegex(orderType)}\\s+(.+)$`, "i"));
-  if (inlineMatch) return inlineMatch[1].trim();
+  if (inlineMatch) {
+    const inlineNumber = inlineMatch[1].match(numberPattern);
+    if (inlineNumber) return inlineNumber[0];
+    if (inlineMatch[1].trim()) return inlineMatch[1].trim();
+  }
+
+  for (const candidate of nearby) {
+    const match = candidate.match(numberPattern);
+    if (match) return match[0];
+  }
 
   for (let i = orderTypeIndex + 1; i < Math.min(lines.length, orderTypeIndex + 5); i += 1) {
     const candidate = normalizeSpaces(lines[i]);
@@ -440,6 +459,47 @@ function escapeRegex(text) {
 
 function splitLines(text) {
   return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function toPdfText(text) {
+  return transliterateCyrillic(normalizeSpaces(String(text || "")));
+}
+
+function transliterateCyrillic(text) {
+  const map = {
+    А: "A", а: "a",
+    Б: "B", б: "b",
+    В: "V", в: "v",
+    Г: "G", г: "g",
+    Д: "D", д: "d",
+    Е: "E", е: "e",
+    Ж: "Zh", ж: "zh",
+    З: "Z", з: "z",
+    И: "I", и: "i",
+    Й: "Y", й: "y",
+    К: "K", к: "k",
+    Л: "L", л: "l",
+    М: "M", м: "m",
+    Н: "N", н: "n",
+    О: "O", о: "o",
+    П: "P", п: "p",
+    Р: "R", р: "r",
+    С: "S", с: "s",
+    Т: "T", т: "t",
+    У: "U", у: "u",
+    Ф: "F", ф: "f",
+    Х: "H", х: "h",
+    Ц: "Ts", ц: "ts",
+    Ч: "Ch", ч: "ch",
+    Ш: "Sh", ш: "sh",
+    Щ: "Sht", щ: "sht",
+    Ъ: "A", ъ: "a",
+    Ь: "Y", ь: "y",
+    Ю: "Yu", ю: "yu",
+    Я: "Ya", я: "ya",
+  };
+
+  return Array.from(String(text || ""), (char) => map[char] ?? char).join("");
 }
 
 function mm(value) {

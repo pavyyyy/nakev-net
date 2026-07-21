@@ -5,16 +5,18 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "../assets/vendor/pdf.worker.min.js";
 const { PDFDocument, StandardFonts, rgb } = PDFLib;
 
 const FROM_ADDRESS_LINES = [
-  "EAZ OOD",
+  "EAZ",
   "Treti Mart 42",
   "4225 Perushtitsa",
 ];
 
+const LEGAL_FOOTER_LINE = "EAZ | 42, Treti Mart Str., BG 4225 Perushtitza, Bulgaria";
+
 const FOOTER_LINES = [
-  "Katya Kusheva",
-  "Deputy production manager",
-  "T: + 359 32 654 115 | F: + 359 32 654 100",
-  "M: +359 888 829 316 | e: k.kusheva@eaz-bg.com | http://www.eaz-bg.com",
+  "Boris Nakev",
+  "CEO | EAZ Ltd",
+  "T: + 359 32 654 101  | F: + 359 32 654 100",
+  "M: +359 888 811 399  | e: nakev@eaz-bg.com | http://www.eaz-bg.com",
 ];
 
 const DELIVERY_ADDRESS_EXCLUDES = [
@@ -352,6 +354,17 @@ async function buildConfirmationPdf(data, templateBytes) {
       });
     }
   }
+
+  // Replace the old template footer with the short EAZ name and address.
+  // Contact numbers are intentionally kept only in the signature above.
+  page.drawRectangle({ x: 0, y: 0, width, height: mm(28), color: rgb(1, 1, 1) });
+  page.drawText(LEGAL_FOOTER_LINE, {
+    x: mm(14),
+    y: mm(12),
+    size: 8.7,
+    font,
+    color: rgb(0.38, 0.43, 0.5),
+  });
 
   drawMultiline(page, FOOTER_LINES, left, mm(48), 8.7, font, 11);
   return output.save();
